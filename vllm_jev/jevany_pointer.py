@@ -16,6 +16,7 @@ from safetensors.torch import load_file
 from transformers import AutoProcessor
 from vllm import PoolingParams
 
+from .decision_template import current_template
 from .media import load_image
 
 SPECIAL_RE = re.compile(r"<\|([A-Za-z0-9_]+)\|>")
@@ -218,6 +219,17 @@ class JevAnyPointerCompiler:
         state = _safe_text(self.tokenizer, payload.state)
         instruction = _safe_text(self.tokenizer, instructions)
         rendered_options = [_safe_text(self.tokenizer, option) for option in options]
+        template = current_template()
+        if template.context_order is not None:
+            # Plain context may move; trained option-close/decision markers stay late.
+            state = _safe_text(
+                self.tokenizer,
+                template.context(
+                    state, instruction, json.dumps(rendered_options, ensure_ascii=False)
+                ),
+            )
+        elif template.instructions_first:
+            state = "Question: " + instruction + "\n\n" + state
         text = marker[0] + state + marker[1] + instruction
         for option in rendered_options:
             text += marker[2] + option + marker[3]
@@ -265,7 +277,9 @@ class JevAnyPointerCompiler:
         if len(option_positions) != len(options):
             raise ValueError("JevAny option delimiter layout mismatch")
         text_state_tokens = len(
-            self.tokenizer(state, add_special_tokens=False).input_ids
+            self.tokenizer(
+                _safe_text(self.tokenizer, payload.state), add_special_tokens=False
+            ).input_ids
         ) + 1
         if text_state_tokens > self.max_state:
             raise ValueError("JevAny text state exceeds checkpoint limit")

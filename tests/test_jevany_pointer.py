@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import sys
+from itertools import permutations
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -27,8 +28,8 @@ except ImportError:
     sys.modules["vllm"] = fake_vllm
 
 from vllm_jev import (
-    JEVANY_POINTER_QWEN35_ARCHITECTURE,
     JEVANY_POINTER_QWEN3_VL_MOE_ARCHITECTURE,
+    JEVANY_POINTER_QWEN35_ARCHITECTURE,
 )
 from vllm_jev import jevany_export as jx
 from vllm_jev import jevany_pointer as jp
@@ -397,7 +398,129 @@ def test_cli_serves_exported_jevany_pointer(tmp_path, monkeypatch):
     argv = calls["argv"]
     assert argv[argv.index("--max-model-len") + 1] == "4609"
     assert "--no-enable-prefix-caching" in argv
+    assert json.loads(argv[argv.index("--mm-processor-kwargs") + 1])["size"]["longest_edge"] == 512 * 512
     assert json.loads(argv[argv.index("--limit-mm-per-prompt") + 1]) == {
         "image": 2,
         "video": 0,
     }
+
+
+@pytest.mark.parametrize(
+    "order", list(permutations(["state", "instructions", "criteria"]))
+)
+def test_context_order_keeps_pointer_readouts_late(tmp_path, monkeypatch, order):
+    from vllm_jev.decision_template import DecisionTemplate
+
+    make_service_dir(tmp_path)
+    processor = FakeProcessor()
+    monkeypatch.setattr(jp.AutoProcessor, "from_pretrained", lambda *a, **k: processor)
+    monkeypatch.setattr(
+        jp, "current_template", lambda: DecisionTemplate({"context_order": list(order)})
+    )
+    compiler = jp.JevAnyPointerCompiler(tmp_path, "jevany-test", 4608)
+    payload = SimpleNamespace(
+        model=None,
+        state="evidence",
+        media=[],
+        questions={
+            "q": {
+                "type": "choice",
+                "instructions": "choose",
+                "criteria": {"a": "alpha", "b": "beta"},
+            }
+        },
+    )
+    result = compiler.compile(payload)
+    ids, positions, decision = result[4:7]
+    q = ids.index(MARKERS[1])
+    prefix = "".join(chr(t - 300) for t in ids[1:q])
+    labels = {"state": "Context:", "instructions": "Question:", "criteria": "Criteria:"}
+    assert [prefix.index(labels[field]) for field in order] == sorted(
+        prefix.index(labels[field]) for field in order
+    )
+    assert len(positions) == 2 and all(q < p < decision for p in positions)
+    assert ids[decision] == MARKERS[4]
+    assert ids.count(MARKERS[1]) == 1
+
+
+@pytest.mark.parametrize("protocol", ["auto", "jevany_pointer_v1"])
+def test_native_prepare_jevany_uses_pinned_export(tmp_path, monkeypatch, protocol):
+    from vllm_jev import native_models
+
+    base, source, _, *_ = make_export_fixture(tmp_path, monkeypatch)
+    meta = torch.load(source / "head.pt", weights_only=True)
+    meta["base_revision"] = "fixture-base-revision"
+    torch.save(meta, source / "head.pt")
+    calls = []
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        return str(source if kwargs["repo_id"].startswith("SimpleJev/") else base)
+
+    monkeypatch.setattr(native_models, "snapshot_download", download)
+    monkeypatch.setattr(native_models.sys, "platform", "linux")
+    model = "SimpleJev/JevAny-Qwen3.5-4B-LoRA"
+    workspace = tmp_path / "workspace"
+    path = native_models.prepare(model, workspace, protocol)
+    manifest = json.loads((path / jx.MANIFEST_FILE).read_text())
+    assert manifest["source_repository"] == model
+    assert manifest["source_revision"] == jx.MODELS[model]
+    assert calls[0]["revision"] == jx.MODELS[model]
+    assert calls[1]["revision"] == "fixture-base-revision"
+    assert not (path / "jev_manifest.json").exists()
+    assert native_models.prepare(model, workspace, protocol) == path
+    assert len(calls) == 2
+
+
+def test_native_prepare_jevany_rejects_other_protocol_before_download(
+    tmp_path, monkeypatch
+):
+    from vllm_jev import native_models
+
+    monkeypatch.setattr(native_models.sys, "platform", "linux")
+    monkeypatch.setattr(
+        native_models,
+        "snapshot_download",
+        lambda **kwargs: pytest.fail("unexpected download"),
+    )
+    with pytest.raises(ValueError, match="uses jevany_pointer_v1"):
+        native_models.prepare(
+            "SimpleJev/JevAny-Qwen3.5-4B-LoRA", tmp_path, "kev_pointer_v1"
+        )
+
+
+def test_native_preparation_cli_accepts_jevany_protocol(tmp_path, monkeypatch, capsys):
+    from vllm_jev import native_models
+
+    calls = []
+    monkeypatch.setattr(
+        native_models, "prepare", lambda *args: calls.append(args) or tmp_path
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "native_models",
+            "SimpleJev/JevAny-Qwen3.5-4B-LoRA",
+            "--workspace",
+            str(tmp_path),
+            "--protocol",
+            "jevany_pointer_v1",
+        ],
+    )
+    native_models.main()
+    assert calls == [
+        ("SimpleJev/JevAny-Qwen3.5-4B-LoRA", tmp_path, "jevany_pointer_v1")
+    ]
+    assert "JEV_CHECKPOINT_READY" in capsys.readouterr().out
+
+
+def test_cli_rejects_jevany_on_mac_before_preparation(tmp_path, monkeypatch, capsys):
+    from vllm_jev import cli
+    monkeypatch.setattr(cli.sys, 'platform', 'darwin')
+    monkeypatch.setattr(cli.sys, 'argv', ['vllm-jev', 'serve', 'SimpleJev/JevAny-Qwen3.5-4B-LoRA', '--workspace', str(tmp_path)])
+    monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **k: pytest.fail('unexpected preparation'))
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert e.value.code == 2
+    assert 'requires Linux' in capsys.readouterr().err

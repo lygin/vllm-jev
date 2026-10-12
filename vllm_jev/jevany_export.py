@@ -12,13 +12,17 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from . import (
+    JEVANY_POINTER_QWEN3_VL_MOE_ARCHITECTURE,
     JEVANY_POINTER_QWEN35_ARCHITECTURE,
     JEVANY_POINTER_QWEN35_MOE_ARCHITECTURE,
-    JEVANY_POINTER_QWEN3_VL_MOE_ARCHITECTURE,
 )
 from .checkpoint import sha256, verify_files
 
 PROTOCOL = "jevany_pointer_v1"
+MODELS = {
+    "SimpleJev/JevAny-Qwen3.5-4B-LoRA": "1c7aa9bab14ac347aeb917c0bcd757838a8a78ce",
+    "SimpleJev/JevAny-Qwen3.8-27B-LoRA": "09c9e9102d5b8cc7d56558d25da1202a761b6c0d",
+}
 FORMAT = "vllm-jev-jevany-pointer-v1"
 HEAD_FILE = "jevany_pointer_head.safetensors"
 MANIFEST_FILE = "jevany_pointer_manifest.json"
@@ -251,6 +255,7 @@ def export_jevany_pointer(
         "source_repository": model_id,
         "source_checkpoint": str(source),
         "foundation_repository": meta["base"],
+        "foundation_revision": meta.get("base_revision"),
         "hidden_size": hidden_size,
         "head_dim": head_dim,
         "head_residual_dim": residual_dim,

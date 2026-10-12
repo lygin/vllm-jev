@@ -171,6 +171,8 @@ def main() -> None:
             parser.error("RSI-Jev serving requires Linux and native vLLM")
         if sys.platform == "darwin" and model_id.startswith("Cloudflare/clef"):
             parser.error("Clef serving requires Linux and native vLLM")
+        if sys.platform == "darwin" and model_id.startswith("SimpleJev/JevAny-"):
+            parser.error("JevAny Pointer serving requires Linux and native vLLM")
         checkpoint = workspace / "checkpoint" / model_id
         prepare = [
             "-m",
@@ -282,6 +284,8 @@ def main() -> None:
                 '{"head_dtype":"model"}',
                 "--limit-mm-per-prompt",
                 json.dumps({"image": jevany_pointer["max_images"], "video": 0}),
+                "--mm-processor-kwargs",
+                json.dumps({"size": {"shortest_edge": 32 * 32, "longest_edge": 512 * 512}}),
             ]
         )
     if is_rsijev:
