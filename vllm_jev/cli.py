@@ -124,6 +124,33 @@ def main() -> None:
             if args.protocol not in ("auto", "laya_markers_v1"):
                 parser.error(f"{model_id} uses laya_markers_v1, not {args.protocol}")
             prepare = None
+        elif not any(
+            path.is_file()
+            for path in (
+                decision_manifest,
+                jevany_pointer_manifest,
+                rsijev_manifest,
+                clef_manifest,
+                vjev_manifest,
+                valen_manifest,
+                laya_manifest,
+                checkpoint / "jev_manifest.json",
+            )
+        ):
+            # A raw release on disk: export it into the workspace like a download.
+            from .native_models import local_checkpoint
+
+            source, model_id = checkpoint, args.model
+            checkpoint = local_checkpoint(source, workspace)
+            prepare = [
+                "-m",
+                "vllm_jev.native_models",
+                str(source),
+                "--workspace",
+                str(workspace),
+                "--protocol",
+                args.protocol,
+            ]
         else:
             if sys.platform == "darwin" and laya_manifest.is_file():
                 parser.error(

@@ -1,6 +1,7 @@
 """Select a verified native vLLM scoring protocol from a Hugging Face model ID."""
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -113,6 +114,80 @@ def prepare(model_id: str, workspace: Path, protocol: str = "auto") -> Path:
 
                 return prepare_laya_mps(model_id, workspace)
         return _prepare(model_id, workspace, protocol)
+
+
+LOCAL_PROTOCOLS = (
+    "decider_slot_v1",
+    "jevk5_letters_v1",
+    "mica_labels_v1",
+    "task_json_v1",
+    "thisthat_slot_v1",
+)
+
+
+def local_checkpoint(source: Path, workspace: Path) -> Path:
+    """Key a local release's prepared checkpoint by a fingerprint of its files."""
+    digest = hashlib.sha256()
+    for file in sorted(source.resolve().iterdir()):
+        if not file.is_file():
+            continue
+        digest.update(f"{file.name}\0{file.stat().st_size}\0".encode())
+        if file.suffix != ".safetensors":
+            digest.update(sha256(file).encode())
+    return workspace.resolve() / "checkpoint" / "local" / digest.hexdigest()[:16]
+
+
+def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path:
+    """Prepare a raw decision release that is already on disk, without downloads."""
+    from .decision_export import (
+        export_decider,
+        export_jevk5,
+        export_mica,
+        export_task_json,
+        export_thisthat,
+    )
+
+    source = source.resolve()
+    files = {file.name for file in source.iterdir() if file.is_file()}
+    if "jevk5_config.json" in files:
+        selected = "jevk5_letters_v1"
+    elif protocol in ("mica_labels_v1", "thisthat_slot_v1", "task_json_v1"):
+        selected = protocol
+    elif "decider_config.json" in files:
+        selected = "decider_slot_v1"
+    else:
+        raise ValueError(
+            f"{source} is neither a prepared checkpoint nor a supported local release; "
+            f"local releases support: {', '.join(LOCAL_PROTOCOLS)}"
+        )
+    if protocol not in ("auto", selected):
+        raise ValueError(f"{source} uses {selected}, not {protocol}")
+    if selected == "task_json_v1" and "adapter_config.json" in files:
+        raise ValueError("local task_json_v1 adapters must be merged before serving")
+    export = {
+        "decider_slot_v1": export_decider,
+        "jevk5_letters_v1": export_jevk5,
+        "mica_labels_v1": export_mica,
+        "task_json_v1": export_task_json,
+        "thisthat_slot_v1": export_thisthat,
+    }[selected]
+    output = local_checkpoint(source, workspace)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(output) + ".lock"):
+        if output.exists():
+            manifest = json.loads((output / "decision_manifest.json").read_text())
+            if manifest.get("prompt_protocol") != selected:
+                raise ValueError("requested protocol differs from cached checkpoint")
+            verify(output, full=True)
+            return output
+        revision = output.name
+        return _publish(
+            output,
+            str(source),
+            revision,
+            selected,
+            lambda temporary: export(source, temporary, str(source), revision),
+        )
 
 
 def _prepare(model_id: str, workspace: Path, protocol: str) -> Path:
@@ -743,9 +818,12 @@ def main() -> None:
         default="auto",
     )
     args = parser.parse_args()
+    source = Path(args.model_id)
     print(
         "JEV_CHECKPOINT_READY",
-        prepare(args.model_id, args.workspace, args.protocol),
+        prepare_local(source, args.workspace, args.protocol)
+        if source.is_dir()
+        else prepare(args.model_id, args.workspace, args.protocol),
         flush=True,
     )
 
