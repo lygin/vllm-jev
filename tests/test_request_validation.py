@@ -100,6 +100,22 @@ def test_jevany_receives_its_media_wire_format(endpoint):
     assert service.calls[0].media == media
 
 
+def test_d3_receives_top_level_images(endpoint):
+    service = RecordingService()
+    client = client_for(endpoint, "vllm_d3_service", service)
+    response = client.post("/v1/systemone", json=payload(images=["image payload"]))
+    assert response.status_code == 200
+    assert service.calls[0].images == ["image payload"]
+
+
+def test_d3_rejects_top_level_videos_before_dispatch(endpoint):
+    service = RecordingService()
+    client = client_for(endpoint, "vllm_d3_service", service)
+    response = client.post("/v1/systemone", json=payload(videos=["video payload"]))
+    assert response.status_code == 422
+    assert not service.calls
+
+
 def test_other_backends_reject_jevany_media(endpoint):
     service = RecordingService()
     client = client_for(endpoint, "vllm_rsijev_service", service)

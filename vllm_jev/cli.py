@@ -56,6 +56,7 @@ def main() -> None:
             "rsijev_xattn_v1",
             "clef_joint_v1",
             "jevany_pointer_v1",
+            "d3_code_readout_v1",
             "kev_pointer_v1",
             "decider_slot_v1",
             "task_json_v1",
@@ -111,12 +112,15 @@ def main() -> None:
         rsijev_manifest = checkpoint / "rsijev_manifest.json"
         clef_manifest = checkpoint / "clef_manifest.json"
         jevany_pointer_manifest = checkpoint / "jevany_pointer_manifest.json"
+        d3_manifest = checkpoint / "d3_manifest.json"
         if sys.platform == "darwin" and rsijev_manifest.is_file():
             parser.error("RSI-Jev serving requires Linux and native vLLM")
         if sys.platform == "darwin" and clef_manifest.is_file():
             parser.error("Clef serving requires Linux and native vLLM")
         if sys.platform == "darwin" and jevany_pointer_manifest.is_file():
             parser.error("JevAny Pointer serving requires Linux and native vLLM")
+        if sys.platform == "darwin" and d3_manifest.is_file():
+            parser.error("d3 serving requires Linux and native vLLM")
         if sys.platform == "darwin" and (checkpoint / "rl_agent_config.json").is_file():
             from .mac_laya import identify_source
 
@@ -129,6 +133,7 @@ def main() -> None:
             for path in (
                 decision_manifest,
                 jevany_pointer_manifest,
+                d3_manifest,
                 rsijev_manifest,
                 clef_manifest,
                 vjev_manifest,
@@ -163,6 +168,8 @@ def main() -> None:
                         if decision_manifest.is_file()
                         else jevany_pointer_manifest
                         if jevany_pointer_manifest.is_file()
+                        else d3_manifest
+                        if d3_manifest.is_file()
                         else rsijev_manifest
                         if rsijev_manifest.is_file()
                         else clef_manifest
@@ -176,6 +183,7 @@ def main() -> None:
                 )["source_repository"]
                 if decision_manifest.is_file()
                 or jevany_pointer_manifest.is_file()
+                or d3_manifest.is_file()
                 or rsijev_manifest.is_file()
                 or clef_manifest.is_file()
                 or vjev_manifest.is_file()
@@ -200,6 +208,8 @@ def main() -> None:
             parser.error("Clef serving requires Linux and native vLLM")
         if sys.platform == "darwin" and model_id.startswith("SimpleJev/JevAny-"):
             parser.error("JevAny Pointer serving requires Linux and native vLLM")
+        if sys.platform == "darwin" and model_id == "Rover00/WeMM-JEV":
+            parser.error("d3 serving requires Linux and native vLLM")
         checkpoint = workspace / "checkpoint" / model_id
         prepare = [
             "-m",
@@ -227,8 +237,10 @@ def main() -> None:
     rsijev_manifest = checkpoint / "rsijev_manifest.json"
     clef_manifest = checkpoint / "clef_manifest.json"
     jevany_pointer_manifest = checkpoint / "jevany_pointer_manifest.json"
+    d3_manifest = checkpoint / "d3_manifest.json"
     is_decision = decision_manifest.is_file()
     is_jevany_pointer = jevany_pointer_manifest.is_file()
+    is_d3 = d3_manifest.is_file()
     is_rsijev = rsijev_manifest.is_file()
     is_clef = clef_manifest.is_file()
     is_valen = valen_manifest.is_file()
@@ -242,6 +254,8 @@ def main() -> None:
             if is_decision
             else jevany_pointer_manifest
             if is_jevany_pointer
+            else d3_manifest
+            if is_d3
             else rsijev_manifest
             if is_rsijev
             else clef_manifest
@@ -313,6 +327,37 @@ def main() -> None:
                 json.dumps({"image": jevany_pointer["max_images"], "video": 0}),
                 "--mm-processor-kwargs",
                 json.dumps({"size": {"shortest_edge": 32 * 32, "longest_edge": 512 * 512}}),
+            ]
+        )
+    if is_d3:
+        from .d3 import IMAGE_SIZE, SERVE_MAX_LENGTH
+
+        d3 = json.loads(d3_manifest.read_text())
+        # Leave the scheduler's final slot outside the prompt limit.
+        defaults[defaults.index("--max-model-len") + 1] = str(
+            (d3["max_length"] or SERVE_MAX_LENGTH) + 1
+        )
+        # Each question needs only its last state, read in one whole-prompt
+        # prefill; bidirectional layers cannot reuse a cached prefix.
+        defaults[defaults.index("--enable-prefix-caching")] = (
+            "--no-enable-prefix-caching"
+        )
+        align = defaults.index("--mamba-cache-mode")
+        del defaults[align : align + 2]
+        if d3["attention_mode"] != "causal":
+            # Model Runner V2 lacks Gated DeltaNet state handling once a hybrid
+            # model has encoder-only layers; V1 serves both together.
+            environment.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+        defaults.extend(
+            [
+                "--dtype",
+                "bfloat16",
+                "--limit-mm-per-prompt",
+                json.dumps({"image": d3["max_images"] if d3["vision"] else 0, "video": 0}),
+                "--mm-processor-kwargs",
+                json.dumps({"size": IMAGE_SIZE}),
+                "--pooler-config",
+                '{"task":"embed","seq_pooling_type":"LAST"}',
             ]
         )
     if is_rsijev:

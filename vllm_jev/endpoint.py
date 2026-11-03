@@ -54,7 +54,8 @@ class SystemOneRequest(BaseModel):
         strict=True,
         description="Shared prefix-cache namespace for requests from a trusted caller.",
     )
-    # Clef takes media beside the state, as its model card documents.
+    # Clef and d3 take images beside the state, as their model cards document;
+    # only Clef also takes videos.
     images: list[Any] | None = None
     videos: list[Any] | None = None
     # JevAny preserves its training wire format: [{type: "image", uri: "..."}].
@@ -511,7 +512,7 @@ async def _system_one(payload: SystemOneRequest, service: _JevService) -> dict:
 
 class JevEndpointPlugin:
     name = "vllm_jev_endpoint"
-    required_tasks = ("classify", "token_embed")
+    required_tasks = ("classify", "embed", "token_embed")
 
     def attach_router(self, app: FastAPI) -> None:
         template = current_template()
@@ -600,10 +601,14 @@ class JevEndpointPlugin:
                         "sequence-classification backend",
                     )
             clef = getattr(raw_request.app.state, "vllm_clef_service", None)
-            if (payload.images or payload.videos) and clef is None:
+            d3 = getattr(raw_request.app.state, "vllm_d3_service", None)
+            if (payload.videos and clef is None) or (
+                payload.images and clef is None and d3 is None
+            ):
                 raise HTTPException(
                     status_code=422,
-                    detail="top-level images and videos are supported only by Clef",
+                    detail="top-level images and videos are supported only by Clef; "
+                    "d3 models take images",
                 )
             jevany_pointer = getattr(
                 raw_request.app.state, "vllm_jevany_pointer_service", None
@@ -614,6 +619,11 @@ class JevEndpointPlugin:
                     detail="top-level media is supported only by JevAny",
                 )
             decision = getattr(raw_request.app.state, "vllm_decision_service", None)
+            if d3 is not None:
+                try:
+                    return await d3.systemone(payload)
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
             if jevany_pointer is not None:
                 try:
                     return await jevany_pointer.systemone(payload)
@@ -670,6 +680,7 @@ class JevEndpointPlugin:
         state.vllm_rsijev_service = None
         state.vllm_clef_service = None
         state.vllm_jevany_pointer_service = None
+        state.vllm_d3_service = None
         manifest = Path(args.model) / "jev_manifest.json"
         valen_manifest = Path(args.model) / "valen_manifest.json"
         vjev_manifest = Path(args.model) / "vjev_manifest.json"
@@ -680,6 +691,7 @@ class JevEndpointPlugin:
         jevany_pointer_manifest = (
             Path(args.model) / "jevany_pointer_manifest.json"
         )
+        d3_manifest = Path(args.model) / "d3_manifest.json"
         if engine_client is None or not (
             manifest.is_file()
             or valen_manifest.is_file()
@@ -689,11 +701,23 @@ class JevEndpointPlugin:
             or rsijev_manifest.is_file()
             or clef_manifest.is_file()
             or jevany_pointer_manifest.is_file()
+            or d3_manifest.is_file()
         ):
             return
         max_inflight = int(os.environ.get("VLLM_JEV_MAX_INFLIGHT", "128"))
         if max_inflight < 1:
             raise ValueError("VLLM_JEV_MAX_INFLIGHT must be positive")
+        if d3_manifest.is_file():
+            from .d3 import D3Service
+
+            state.vllm_d3_service = D3Service(
+                engine_client,
+                Path(args.model),
+                getattr(args, "served_model_name", None) or "d3",
+                engine_client.model_config.max_model_len - 1,
+                max_inflight=max_inflight,
+            )
+            return
         if decision_manifest.is_file():
             from .decision import DecisionService
 

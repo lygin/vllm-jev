@@ -15,6 +15,7 @@ from vllm.model_executor.models.qwen3_5 import (
 from vllm.model_executor.models.qwen3_vl_moe import (
     Qwen3VLMoeForConditionalGeneration,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 
 
 class JevQwen35CausalLM(Qwen3_5ForCausalLM, IsHybrid, SupportsMRoPE):
@@ -98,6 +99,47 @@ class VllmJevAnyPointerQwen3VLMoeForTokenEmbedding(
     as_embedding_model(Qwen3VLMoeForConditionalGeneration)
 ):
     """Native MoE Qwen3-VL image/text states for JevAny's Pointer head."""
+
+
+class VllmD3Qwen35ForEmbedding(as_embedding_model(Qwen3_5ForConditionalGeneration)):
+    """Native Qwen3.5 last-token states for the d3 code readout.
+
+    d3 releases save a bare ``Qwen3_5Model``, so their weights lack the
+    ``model.`` prefix and the output embedding. A noncausal release exports
+    ``is_causal: false``, which builds the full-attention layers as
+    bidirectional encoder-only attention; the Gated DeltaNet layers stay causal.
+    """
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "language_model.": "language_model.model.",
+            "lm_head.": None,
+            "mtp.": None,
+        }
+    )
+
+    def __init__(self, *, vllm_config, prefix: str = ""):
+        # vLLM passes vllm_config only to classes whose signature also names prefix.
+        model_config = vllm_config.model_config
+        if not getattr(model_config.hf_text_config, "is_causal", True):
+            if (
+                getattr(model_config.hf_config, "is_causal", True)
+                or vllm_config.scheduler_config.enable_chunked_prefill
+                or vllm_config.cache_config.enable_prefix_caching
+            ):
+                # A bidirectional layer must see the whole prompt in one step.
+                raise ValueError(
+                    "d3 bidirectional attention requires whole-prompt prefill: "
+                    "disable chunked prefill and prefix caching"
+                )
+            if vllm_config.use_v2_model_runner:
+                # Model Runner V2 serves encoder-only layers without the Gated
+                # DeltaNet state handling of hybrid models.
+                raise ValueError(
+                    "d3 bidirectional attention requires the V1 model runner: "
+                    "set VLLM_USE_V2_MODEL_RUNNER=0"
+                )
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
 
 class VllmJevQwen3ForTokenEmbedding(as_embedding_model(Qwen3ForCausalLM)):

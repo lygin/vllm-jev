@@ -121,6 +121,7 @@ Choose a checkpoint for your platform and run its command. Linux uses native vLL
 | [SimpleJev/JevAny-Qwen3.8-27B-LoRA](https://huggingface.co/SimpleJev/JevAny-Qwen3.8-27B-LoRA) | Text, images | Linux | `vllm-jev serve SimpleJev/JevAny-Qwen3.8-27B-LoRA` |
 | [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) (9B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef-flash` |
 | [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) (27B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef` |
+| [Rover00/WeMM-JEV](https://huggingface.co/Rover00/WeMM-JEV) (27B) | Text, images | Linux | `vllm-jev serve Rover00/WeMM-JEV` |
 
 <a id="rsi-jev-experimental"></a>
 <a id="clef-experimental"></a>
@@ -128,6 +129,8 @@ Choose a checkpoint for your platform and run its command. Linux uses native vLL
 The RSI-Jev Linux adapter was contributed by [Shanghua Gao (PR #2)](https://github.com/mode-io/vllm-jev/pull/2), and the Clef adapter by [Arcobalneo (PR #4)](https://github.com/mode-io/vllm-jev/pull/4). See the [RSI-Jev](docs/guide.md#rsi-jev) and [Clef](docs/guide.md#clef) guides for input limits and request formats.
 
 The JevAny Pointer adapter was contributed by [heshien / AsirAsir02 (PR #9)](https://github.com/mode-io/vllm-jev/pull/9). See the [JevAny guide](docs/guide.md#jevany-pointer) for requests and limits.
+
+WeMM-JEV uses the d3 code-readout format with bidirectional full-attention layers; see the [WeMM-JEV guide](docs/guide.md#wemm-jev-d3) for image requests and limits.
 
 ### Additional decision models (experimental)
 

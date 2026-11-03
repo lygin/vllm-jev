@@ -20,6 +20,7 @@ JEVANY_POINTER_QWEN35_MOE_ARCHITECTURE = (
 JEVANY_POINTER_QWEN3_VL_MOE_ARCHITECTURE = (
     "VllmJevAnyPointerQwen3VLMoeForTokenEmbedding"
 )
+D3_QWEN35_ARCHITECTURE = "VllmD3Qwen35ForEmbedding"
 
 
 def register() -> None:
@@ -44,6 +45,7 @@ def register() -> None:
         JEVANY_POINTER_QWEN35_ARCHITECTURE,
         JEVANY_POINTER_QWEN35_MOE_ARCHITECTURE,
         JEVANY_POINTER_QWEN3_VL_MOE_ARCHITECTURE,
+        D3_QWEN35_ARCHITECTURE,
     ):
         ModelRegistry.register_model(architecture, f"vllm_jev.model:{architecture}")
     if os.environ.get("VLLM_JEV_ONLINE_PREFIX_CACHE") == "1":

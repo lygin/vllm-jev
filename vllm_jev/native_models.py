@@ -21,6 +21,8 @@ from .public_models import prepare as prepare_open_jev
 BRANCH_PROTOCOL = "openjev_branch_v03"
 CHOICE_PROTOCOL = "open_jev_choice"
 TINY_PROTOCOL = "tiny_jev_marker"
+D3_PROTOCOL = "d3_code_readout_v1"
+D3_FILES = {"decision_config.json", "readout.safetensors"}
 DECISION_PROTOCOLS = (
     "kev_pointer_v1",
     "decider_slot_v1",
@@ -65,6 +67,8 @@ def _publish(
             if manifest.get("format") == "vllm-jev-decision-v1"
             else "jevany_pointer_manifest.json"
             if protocol == "jevany_pointer_v1"
+            else "d3_manifest.json"
+            if protocol == D3_PROTOCOL
             else "jev_manifest.json"
         )
         (temporary / name).write_text(json.dumps(manifest, indent=2) + "\n")
@@ -91,6 +95,7 @@ def prepare(model_id: str, workspace: Path, protocol: str = "auto") -> Path:
         "rsijev_xattn_v1",
         "clef_joint_v1",
         "jevany_pointer_v1",
+        D3_PROTOCOL,
         *DECISION_PROTOCOLS,
     ):
         raise ValueError(f"unknown protocol: {protocol}")
@@ -122,6 +127,7 @@ LOCAL_PROTOCOLS = (
     "mica_labels_v1",
     "task_json_v1",
     "thisthat_slot_v1",
+    D3_PROTOCOL,
 )
 
 
@@ -149,7 +155,9 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
 
     source = source.resolve()
     files = {file.name for file in source.iterdir() if file.is_file()}
-    if "jevk5_config.json" in files:
+    if D3_FILES <= files:
+        selected = D3_PROTOCOL
+    elif "jevk5_config.json" in files:
         selected = "jevk5_letters_v1"
     elif protocol in ("mica_labels_v1", "thisthat_slot_v1", "task_json_v1"):
         selected = protocol
@@ -164,18 +172,26 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
         raise ValueError(f"{source} uses {selected}, not {protocol}")
     if selected == "task_json_v1" and "adapter_config.json" in files:
         raise ValueError("local task_json_v1 adapters must be merged before serving")
+    if selected == D3_PROTOCOL and sys.platform == "darwin":
+        raise ValueError("d3 serving requires Linux and native vLLM")
+    from .d3_export import export_d3
+
     export = {
         "decider_slot_v1": export_decider,
         "jevk5_letters_v1": export_jevk5,
         "mica_labels_v1": export_mica,
         "task_json_v1": export_task_json,
         "thisthat_slot_v1": export_thisthat,
+        D3_PROTOCOL: lambda source, output, model_id, _: export_d3(
+            source, output, model_id
+        ),
     }[selected]
+    name = "d3_manifest.json" if selected == D3_PROTOCOL else "decision_manifest.json"
     output = local_checkpoint(source, workspace)
     output.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(output) + ".lock"):
         if output.exists():
-            manifest = json.loads((output / "decision_manifest.json").read_text())
+            manifest = json.loads((output / name).read_text())
             if manifest.get("prompt_protocol") != selected:
                 raise ValueError("requested protocol differs from cached checkpoint")
             verify(output, full=True)
@@ -190,8 +206,52 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
         )
 
 
+def _prepare_d3(
+    model_id: str, workspace: Path, protocol: str, revision: str | None
+) -> Path:
+    from .d3_export import SOURCE_FILES, export_d3, verify_d3
+
+    if sys.platform == "darwin":
+        raise ValueError("d3 serving requires Linux and native vLLM")
+    if protocol not in ("auto", D3_PROTOCOL):
+        raise ValueError(f"{model_id} uses {D3_PROTOCOL}, not {protocol}")
+    output = workspace / "checkpoint" / model_id
+    if output.exists():
+        manifest = json.loads((output / "d3_manifest.json").read_text())
+        if manifest.get("source_repository") != model_id:
+            raise ValueError("cached checkpoint belongs to another repository")
+        verify_d3(output, full=True)
+        return output
+    if revision is None:
+        revision = HfApi().model_info(model_id, files_metadata=False, token=False).sha
+    source = Path(
+        snapshot_download(
+            repo_id=model_id,
+            revision=revision,
+            token=False,
+            local_dir=workspace / "public" / model_id,
+            allow_patterns=SOURCE_FILES,
+        )
+    )
+    return _publish(
+        output,
+        model_id,
+        revision,
+        D3_PROTOCOL,
+        lambda temporary: export_d3(source, temporary, model_id),
+    )
+
+
 def _prepare(model_id: str, workspace: Path, protocol: str) -> Path:
+    from .d3_export import MODELS as D3_MODELS
     from .jevany_export import MODELS as JEVANY_MODELS
+
+    if (
+        model_id in D3_MODELS
+        or protocol == D3_PROTOCOL
+        or (workspace / "checkpoint" / model_id / "d3_manifest.json").is_file()
+    ):
+        return _prepare_d3(model_id, workspace, protocol, D3_MODELS.get(model_id))
 
     if model_id in JEVANY_MODELS:
         from .jevany_export import export_jevany_pointer, verify_jevany_pointer
@@ -463,6 +523,8 @@ def _prepare(model_id: str, workspace: Path, protocol: str) -> Path:
 
     info = HfApi().model_info(model_id, files_metadata=False, token=False)
     files = {item.rfilename for item in info.siblings}
+    if D3_FILES <= files:
+        return _prepare_d3(model_id, workspace, protocol, info.sha)
     from .decision_protocols import TASK_JSON_MODELS, THIS_THAT_MODELS
 
     if "jevk5_config.json" in files or protocol == "jevk5_letters_v1":
@@ -813,6 +875,7 @@ def main() -> None:
             "rsijev_xattn_v1",
             "clef_joint_v1",
             "jevany_pointer_v1",
+            D3_PROTOCOL,
             *DECISION_PROTOCOLS,
         ),
         default="auto",

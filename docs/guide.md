@@ -61,6 +61,7 @@ Input support depends on the model:
 | [SimpleJev/JevAny-Qwen3.8-27B-LoRA](https://huggingface.co/SimpleJev/JevAny-Qwen3.8-27B-LoRA) | Text, images | Linux | `vllm-jev serve SimpleJev/JevAny-Qwen3.8-27B-LoRA` |
 | [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) (9B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef-flash` |
 | [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) (27B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef` |
+| [Rover00/WeMM-JEV](https://huggingface.co/Rover00/WeMM-JEV) (27B) | Text, images | Linux | `vllm-jev serve Rover00/WeMM-JEV` |
 
 Use `yah01/vjev-vision` for the current vjev release; the pilot is an earlier checkpoint. Both were trained on single images.
 
@@ -164,6 +165,39 @@ vllm-jev serve /path/to/checkpoint
 ```
 
 Use `Cloudflare/clef-flash` for the 9B release.
+
+### WeMM-JEV (d3)
+
+[WeMM-JEV](https://huggingface.co/Rover00/WeMM-JEV) is a 27B Qwen3.8 decision model in the d3 code-readout format. It runs on Linux and answers Choice, Noul and Score through `/v1/systemone`. Each question is one forward pass: the prompt lists every option under a short answer code (`A`, `B`, …, `AA`, …), and a 255-way readout scores those codes at the last position.
+
+```bash
+vllm-jev serve Rover00/WeMM-JEV
+```
+
+First use downloads the pinned release (about 52 GB of bf16 weights), checks its files, and links them into a reusable checkpoint. Only the weights, readout, tokenizer and processor files are downloaded; the release's Python runtime is not executed. A release already on disk can be served directly with `vllm-jev serve /path/to/WeMM-JEV`. The optional protocol name is `d3_code_readout_v1`.
+
+- Up to 64 questions per request, with 1–255 Choice options or 2–10 Score levels each. Questions run as independent sequences, which vLLM batches.
+- Images: up to 8 PNG, JPEG or WebP data URLs in the top-level `images` list, 8 MB each. As in the release, images over 1.6 MP are first downscaled, then the processor sizes each between 65,536 and 1,638,400 pixels (one token per 32×32 pixels). Videos are not supported.
+- The release sets no input limit; serving defaults to 16,384 tokens per question, including image tokens. Overlong questions are rejected, never truncated. Raise the limit with `--max-model-len`.
+- The release's full-attention layers read the whole prompt (bidirectional), while its Gated DeltaNet layers stay causal. vLLM therefore prefills each question in one step: chunked prefill and prefix caching are disabled, and there is no reuse of a shared state across questions. The server uses vLLM's V1 model runner (`VLLM_USE_V2_MODEL_RUNNER=0`), because Model Runner V2 does not yet combine encoder-only layers with Gated DeltaNet state.
+- The 27B weights need about 52 GB; one 80 GB GPU fits them with room for activations. Long image prompts are prefilled in one step, so lower `--max-model-len` or `--max-num-batched-tokens` if prefill runs out of memory.
+- `context_order`, `instructions-first`, and state/instruction wrappers are supported. Images stay directly before the state, and the closing answer cue stays last; changing the order can change answers.
+
+```json
+{
+  "state": "Look at the image.",
+  "images": ["data:image/png;base64,..."],
+  "questions": {
+    "object": {
+      "type": "choice",
+      "instructions": "What is shown in the image?",
+      "criteria": {"A": "A cat", "B": "A dog", "C": "A car"}
+    }
+  }
+}
+```
+
+Responses follow the release: Choice returns `choice`, `probabilities` and an entropy-based `confidence`; Noul returns `noul`; Score returns `score`, `probabilities`, `confidence` and `legend`. vLLM's attention kernels differ from the release's SDPA path, so probabilities can differ slightly and near-ties can flip.
 
 ## Serving options
 
