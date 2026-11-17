@@ -19,6 +19,12 @@ from vllm import PoolingParams
 from .decision_protocols import jevk5_prompt, mica_prompt, packed_slots, task_prompt
 from .decision_template import current_template
 
+# Leading ordinal on a Score level description ("3: agree", "- 3 : agree").
+# Kept out of the f-string that strips it: an f-string expression part may not
+# contain a backslash before Python 3.12 (PEP 701), and this package still
+# installs on 3.10 interpreters (see requires-python in pyproject.toml).
+_LEVEL_ORDINAL_RE = re.compile(r"^\s*-?\d+\s*:\s*")
+
 
 def _json(value):
     return (
@@ -443,7 +449,7 @@ class DecisionCompiler:
                 rows = [
                     self._row(
                         base,
-                        f"{instructions}\nProposed answer: {re.sub(r'^\s*-?\d+\s*:\s*', '', level)}\nDoes the proposed answer fit?",
+                        f"{instructions}\nProposed answer: {_LEVEL_ORDINAL_RE.sub('', level)}\nDoes the proposed answer fit?",
                         ["no", "yes"],
                     )
                     for level in descriptions

@@ -7,7 +7,11 @@ name = "vllm-jev"
 version = "0.3.7"
 description = "Native vLLM pooling and endpoint integration for Jev candidate scoring"
 readme = "README.md"
-requires-python = ">=3.12"
+# 3.10 so the wheel installs into the KunLun P800 image, whose vendor XPU
+# torch/vLLM conda env is python3.10. The package is pure Python and uses no
+# 3.11+ stdlib APIs; upstream's >=3.12 came from vLLM's own floor, which does
+# not apply when installing --no-deps against a vendor vLLM build.
+requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
 dependencies = [
