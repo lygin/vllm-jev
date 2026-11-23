@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-jev"
-version = "0.3.7"
+version = "0.3.8"
 description = "Native vLLM pooling and endpoint integration for Jev candidate scoring"
 readme = "README.md"
 # 3.10 so the wheel installs into the KunLun P800 image, whose vendor XPU

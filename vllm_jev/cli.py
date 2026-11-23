@@ -57,6 +57,7 @@ def main() -> None:
             "clef_joint_v1",
             "jevany_pointer_v1",
             "d3_code_readout_v1",
+            "pplx_joint_readout_v4",
             "kev_pointer_v1",
             "decider_slot_v1",
             "task_json_v1",
@@ -208,7 +209,10 @@ def main() -> None:
             parser.error("Clef serving requires Linux and native vLLM")
         if sys.platform == "darwin" and model_id.startswith("SimpleJev/JevAny-"):
             parser.error("JevAny Pointer serving requires Linux and native vLLM")
-        if sys.platform == "darwin" and model_id == "Rover00/WeMM-JEV":
+        if sys.platform == "darwin" and (
+            model_id == "Rover00/WeMM-JEV"
+            or model_id.startswith("perplexity-ai/pplx-decider")
+        ):
             parser.error("d3 serving requires Linux and native vLLM")
         checkpoint = workspace / "checkpoint" / model_id
         prepare = [
@@ -330,12 +334,19 @@ def main() -> None:
             ]
         )
     if is_d3:
-        from .d3 import IMAGE_SIZE, SERVE_MAX_LENGTH
+        from .d3 import SERVE_MAX_LENGTH, image_size
+        from .pplx import PROTOCOL as PPLX_PROTOCOL
+        from .pplx import check_template
 
         d3 = json.loads(d3_manifest.read_text())
+        if d3["prompt_protocol"] == PPLX_PROTOCOL:
+            try:
+                check_template(template)
+            except ValueError as error:
+                parser.error(str(error))
         # Leave the scheduler's final slot outside the prompt limit.
         defaults[defaults.index("--max-model-len") + 1] = str(
-            (d3["max_length"] or SERVE_MAX_LENGTH) + 1
+            (d3["max_length"] or d3.get("default_max_length") or SERVE_MAX_LENGTH) + 1
         )
         # Each question needs only its last state, read in one whole-prompt
         # prefill; bidirectional layers cannot reuse a cached prefix.
@@ -355,7 +366,7 @@ def main() -> None:
                 "--limit-mm-per-prompt",
                 json.dumps({"image": d3["max_images"] if d3["vision"] else 0, "video": 0}),
                 "--mm-processor-kwargs",
-                json.dumps({"size": IMAGE_SIZE}),
+                json.dumps({"size": image_size(d3)}),
                 "--pooler-config",
                 '{"task":"embed","seq_pooling_type":"LAST"}',
             ]

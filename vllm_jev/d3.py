@@ -346,11 +346,12 @@ def fit(width: int, height: int, limit: int) -> tuple[int, int]:
     return fitted_width, fitted_height
 
 
-def load_image(value) -> Image.Image:
+def load_image(value, cap: int = IMAGE_CAP_PIXELS) -> Image.Image:
     """One base64 image data URL as RGB pixels, as the release's server reads it.
 
-    Images over 1.6 MP are downscaled with LANCZOS and re-encoded first, as the
-    release's ``inference`` engine does; the processor then resizes them again.
+    Images over ``cap`` pixels (1.6 MP) are downscaled with LANCZOS and
+    re-encoded first, as the release's ``inference`` engine does; the processor
+    then resizes them again. ``cap=0`` leaves the resizing to the processor.
     """
     if not isinstance(value, str):
         raise ValueError("images must be base64 data URLs")
@@ -378,7 +379,7 @@ def load_image(value) -> Image.Image:
                 )
             probe.verify()
         with Image.open(io.BytesIO(raw)) as image:
-            size = fit(image.width, image.height, IMAGE_CAP_PIXELS)
+            size = fit(image.width, image.height, cap)
             if size != image.size:
                 kind = "PNG" if image.format == "PNG" else "JPEG"
                 alpha = kind == "PNG" and (
@@ -400,15 +401,26 @@ def load_image(value) -> Image.Image:
         raise ValueError("invalid image") from error
 
 
-def image_tokens(image_processor, image: Image.Image) -> int:
+def image_tokens(image_processor, image: Image.Image, size=IMAGE_SIZE) -> int:
     """Input tokens of one image after the processor's resize."""
     patches = image_processor.get_number_of_image_patches(
-        image.height, image.width, {"size": IMAGE_SIZE}
+        image.height, image.width, {"size": size}
     )
     return patches // image_processor.merge_size**2
 
 
+def image_size(manifest: dict) -> dict:
+    """The processor's pixel range; a release may set its own ceiling."""
+    longest = manifest.get("max_pixels", IMAGE_SIZE["longest_edge"])
+    return {**IMAGE_SIZE, "longest_edge": longest}
+
+
 class D3Service:
+    # Names the model family in errors.
+    label = "d3"
+    # Images over this many pixels are downscaled before the processor sees them.
+    image_cap = IMAGE_CAP_PIXELS
+
     def __init__(
         self,
         engine_client,
@@ -420,6 +432,7 @@ class D3Service:
         from transformers import AutoProcessor
 
         manifest = json.loads((model_path / MANIFEST_FILE).read_text())
+        self.manifest = manifest
         self.engine_client = engine_client
         self.codes = manifest["codes"]
         self.hidden_size = manifest["hidden_size"]
@@ -430,12 +443,13 @@ class D3Service:
         self.vision = manifest["vision"]
         self.max_images = manifest["max_images"]
         self.image_pad = manifest["image_token_id"]
+        self.image_size = image_size(manifest)
         limit = manifest.get("max_length")
         self.max_length = max_length if limit is None else min(max_length, limit)
         self.processor = AutoProcessor.from_pretrained(
             model_path, local_files_only=True
         )
-        self.processor.image_processor.size = dict(IMAGE_SIZE)
+        self.processor.image_processor.size = dict(self.image_size)
         self.tokenizer = self.processor.tokenizer
         self.model_names = [model_id] if isinstance(model_id, str) else model_id
         self.model_id = self.model_names[0]
@@ -448,22 +462,23 @@ class D3Service:
         if not isinstance(values, list):
             raise ValueError("images must be a list of base64 data URLs")
         if values and not self.vision:
-            raise ValueError("this d3 checkpoint has no vision tower")
+            raise ValueError(f"this {self.label} checkpoint has no vision tower")
         if len(values) > self.max_images:
-            raise ValueError(f"d3 accepts at most {self.max_images} images")
+            raise ValueError(f"{self.label} accepts at most {self.max_images} images")
         images = []
         for number, value in enumerate(values):
             try:
-                images.append(load_image(value))
+                images.append(load_image(value, self.image_cap))
             except ValueError as error:
                 raise ValueError(f"images[{number}]: {error}") from error
         return images
 
-    def _compile(self, payload):
+    def _inputs(self, payload) -> tuple[list[Image.Image], list[int]]:
+        """Check the request outside its questions; its images and their token counts."""
         if payload.model not in (None, "vllm-jev", *self.model_names):
             raise ValueError("requested model is not loaded")
         if payload.videos:
-            raise ValueError("d3 serving accepts images, not videos")
+            raise ValueError(f"{self.label} serving accepts images, not videos")
         questions = payload.questions
         if not isinstance(questions, dict) or not 1 <= len(questions) <= MAX_QUESTIONS:
             raise ValueError(f"System One requires 1 to {MAX_QUESTIONS} questions")
@@ -474,13 +489,18 @@ class D3Service:
         images = self._images(payload.images)
         try:
             counts = [
-                image_tokens(self.processor.image_processor, image) for image in images
+                image_tokens(self.processor.image_processor, image, self.image_size)
+                for image in images
             ]
         except ValueError as error:
             raise ValueError(f"image rejected by the processor: {error}") from error
+        return images, counts
+
+    def _compile(self, payload):
+        images, counts = self._inputs(payload)
         order = context_order()
         invalid, rendered = {}, []
-        for key, question in questions.items():
+        for key, question in payload.questions.items():
             if not isinstance(key, str) or not key:
                 raise ValueError("question IDs must be nonempty strings")
             try:
@@ -510,11 +530,22 @@ class D3Service:
         sequences = self.tokenizer(
             [text for _, _, text in rendered], add_special_tokens=False
         )["input_ids"]
+        return self._prompts(
+            [
+                (key, question, ids)
+                for (key, question, _), ids in zip(rendered, sequences)
+            ],
+            images,
+            counts,
+        )
+
+    def _prompts(self, sequences, images, counts):
+        """vLLM prompts for ``(key, question, token ids)``; overlong questions fail the request."""
         compiled, over = [], {}
-        for (key, question, _), ids in zip(rendered, sequences):
+        for key, question, ids in sequences:
             if ids.count(self.image_pad) != len(images):
                 raise RuntimeError(
-                    "d3 prompt image placeholders do not match its images"
+                    f"{self.label} prompt image placeholders do not match its images"
                 )
             # vLLM expands each image placeholder into the image's tokens.
             expected, image = [], iter(counts)
@@ -528,7 +559,7 @@ class D3Service:
                 prompt["multi_modal_data"] = {
                     "image": images[0] if len(images) == 1 else images
                 }
-                prompt["mm_processor_kwargs"] = {"size": dict(IMAGE_SIZE)}
+                prompt["mm_processor_kwargs"] = {"size": dict(self.image_size)}
             compiled.append((key, question, expected, prompt))
         if over:
             raise ValueError(
@@ -556,10 +587,14 @@ class D3Service:
                 if final is None or not final.finished:
                     raise RuntimeError("vLLM returned no final pooling result")
                 if list(final.prompt_token_ids) != expected:
-                    raise RuntimeError("vLLM tokenization differs from the d3 prompt")
+                    raise RuntimeError(
+                        f"vLLM tokenization differs from the {self.label} prompt"
+                    )
                 hidden = torch.as_tensor(final.outputs.data).reshape(-1)
                 if hidden.numel() != self.hidden_size:
-                    raise RuntimeError("vLLM returned an incomplete d3 state")
+                    raise RuntimeError(
+                        f"vLLM returned an incomplete {self.label} state"
+                    )
                 complete = True
                 return hidden
             finally:
@@ -581,9 +616,11 @@ class D3Service:
                 hidden, self.readout, len(question.keys), self.temperature
             )
             try:
-                answers[key] = answer(question, probabilities)
+                answers[key] = self._answer(question, probabilities)
             except ValueError as error:
-                raise RuntimeError(f"d3 readout failed for {key}: {error}") from error
+                raise RuntimeError(
+                    f"{self.label} readout failed for {key}: {error}"
+                ) from error
         return {
             "model": self.model_id,
             "answers": answers,
@@ -593,6 +630,9 @@ class D3Service:
             },
             "metadata": {"inference_seconds": time.perf_counter() - started},
         }
+
+    def _answer(self, question: Question, probabilities) -> dict:
+        return answer(question, probabilities)
 
 
 def _pooling_params():

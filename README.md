@@ -122,6 +122,8 @@ Choose a checkpoint for your platform and run its command. Linux uses native vLL
 | [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) (9B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef-flash` |
 | [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) (27B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef` |
 | [Rover00/WeMM-JEV](https://huggingface.co/Rover00/WeMM-JEV) (27B) | Text, images | Linux | `vllm-jev serve Rover00/WeMM-JEV` |
+| [perplexity-ai/pplx-decider-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-v1.3) (27B) | Text, images | Linux | `vllm-jev serve perplexity-ai/pplx-decider-v1.3` |
+| [perplexity-ai/pplx-decider-flash-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-flash-v1.3) (4B) | Text, images | Linux | `vllm-jev serve perplexity-ai/pplx-decider-flash-v1.3` |
 
 <a id="rsi-jev-experimental"></a>
 <a id="clef-experimental"></a>
@@ -131,6 +133,8 @@ The RSI-Jev Linux adapter was contributed by [Shanghua Gao (PR #2)](https://gith
 The JevAny Pointer adapter was contributed by [heshien / AsirAsir02 (PR #9)](https://github.com/mode-io/vllm-jev/pull/9). See the [JevAny guide](docs/guide.md#jevany-pointer) for requests and limits.
 
 WeMM-JEV uses the d3 code-readout format with bidirectional full-attention layers; see the [WeMM-JEV guide](docs/guide.md#wemm-jev-d3) for image requests and limits.
+
+pplx-decider v1.3 (27B and 4B flash) uses Perplexity's chunked readout protocol on the same bidirectional backbone; see the [pplx-decider guide](docs/guide.md#pplx-decider). Locate span extraction is not supported.
 
 ### Additional decision models (experimental)
 

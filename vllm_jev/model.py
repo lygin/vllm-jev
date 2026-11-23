@@ -102,9 +102,9 @@ class VllmJevAnyPointerQwen3VLMoeForTokenEmbedding(
 
 
 class VllmD3Qwen35ForEmbedding(as_embedding_model(Qwen3_5ForConditionalGeneration)):
-    """Native Qwen3.5 last-token states for the d3 code readout.
+    """Native Qwen3.5 last-token states for the d3 and pplx-decider code readouts.
 
-    d3 releases save a bare ``Qwen3_5Model``, so their weights lack the
+    These releases save a bare ``Qwen3_5Model``, so their weights lack the
     ``model.`` prefix and the output embedding. A noncausal release exports
     ``is_causal: false``, which builds the full-attention layers as
     bidirectional encoder-only attention; the Gated DeltaNet layers stay causal.

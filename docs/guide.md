@@ -62,6 +62,8 @@ Input support depends on the model:
 | [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) (9B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef-flash` |
 | [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) (27B) | Text, images, video | Linux | `vllm-jev serve Cloudflare/clef` |
 | [Rover00/WeMM-JEV](https://huggingface.co/Rover00/WeMM-JEV) (27B) | Text, images | Linux | `vllm-jev serve Rover00/WeMM-JEV` |
+| [perplexity-ai/pplx-decider-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-v1.3) (27B) | Text, images | Linux | `vllm-jev serve perplexity-ai/pplx-decider-v1.3` |
+| [perplexity-ai/pplx-decider-flash-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-flash-v1.3) (4B) | Text, images | Linux | `vllm-jev serve perplexity-ai/pplx-decider-flash-v1.3` |
 
 Use `yah01/vjev-vision` for the current vjev release; the pilot is an earlier checkpoint. Both were trained on single images.
 
@@ -198,6 +200,28 @@ First use downloads the pinned release (about 52 GB of bf16 weights), checks its
 ```
 
 Responses follow the release: Choice returns `choice`, `probabilities` and an entropy-based `confidence`; Noul returns `noul`; Score returns `score`, `probabilities`, `confidence` and `legend`. vLLM's attention kernels differ from the release's SDPA path, so probabilities can differ slightly and near-ties can flip.
+
+### pplx-decider
+
+[pplx-decider-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-v1.3) (27B, Qwen3.8) and [pplx-decider-flash-v1.3](https://huggingface.co/perplexity-ai/pplx-decider-flash-v1.3) (4B, Qwen3.5) are Perplexity's decision models. They run on Linux and answer Choice, Noul and Score through `/v1/systemone`. Like WeMM-JEV, they keep the full-attention layers bidirectional and score up to 255 answer codes with a separate readout, but they use their own request protocol (`joint-chunked-readout-v1`, version 4).
+
+```bash
+vllm-jev serve perplexity-ai/pplx-decider-flash-v1.3
+# Or: perplexity-ai/pplx-decider-v1.3
+```
+
+First use downloads the pinned release (about 9 GB for flash, 52 GB for the 27B model), checks every file against the release's checksums, and links the weights into a reusable checkpoint. The release's `source/` package and Locate adapter are not downloaded. A release already on disk can be served with `vllm-jev serve /path/to/release`. The optional protocol name is `pplx_joint_readout_v4`.
+
+- Each question is answered in its own sequence: the system prompt, the images, `State:` and the state, then the `<|fim_middle|>` separator, the question with one coded line per option, and the `<|fim_suffix|>` readout marker. This is the release's default `separate` mode, so answers do not depend on the other questions. The `isolated` mode is not served.
+- Up to 64 questions per request, with 1–255 Choice options or 2–255 Score levels each. Score levels need not be distinct.
+- Literal special tokens in the state, instructions or options, such as `<|fim_suffix|>` or `<|image_pad|>`, are neutralized with full-width brackets, as in the release.
+- Images: up to 8 PNG, JPEG or WebP data URLs in the top-level `images` list, 8 MB and 16 megapixels each. The processor resizes each image to between 65,536 and 1,638,400 pixels (the release's `max_pixels`), one token per 32×32 pixels. Videos are not supported.
+- The default limit is 32,768 tokens per question, including image tokens, as in the release (training used up to 30,720). Overlong questions are rejected, never truncated. Lower `--max-model-len` if a long prefill runs out of memory.
+- `"type": "locate"` (span extraction with the release's LoRA adapter) is not supported and returns 422.
+- Only the native layout is supported. `instructions-first` and other `context_order` values are rejected at startup; `state_template` and `instruction_template` still apply.
+- As for WeMM-JEV, chunked prefill and prefix caching are disabled, and the server uses vLLM's V1 model runner.
+
+Responses follow the release: Choice returns `choice`, `probabilities` and a `confidence` that rescales the top probability above uniform to [0, 1]; Noul returns `noul`; Score returns `score`, `probabilities`, `legend` and a distance-based `confidence`. The calibrated temperature saved with the release is applied. vLLM's kernels differ from the release's SDPA path, so probabilities can differ slightly and near-ties can flip.
 
 ## Serving options
 

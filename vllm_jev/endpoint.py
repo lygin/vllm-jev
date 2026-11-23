@@ -709,11 +709,15 @@ class JevEndpointPlugin:
             raise ValueError("VLLM_JEV_MAX_INFLIGHT must be positive")
         if d3_manifest.is_file():
             from .d3 import D3Service
+            from .pplx import PROTOCOL as PPLX_PROTOCOL
+            from .pplx import PplxService
 
-            state.vllm_d3_service = D3Service(
+            protocol = json.loads(d3_manifest.read_text()).get("prompt_protocol")
+            service = PplxService if protocol == PPLX_PROTOCOL else D3Service
+            state.vllm_d3_service = service(
                 engine_client,
                 Path(args.model),
-                getattr(args, "served_model_name", None) or "d3",
+                getattr(args, "served_model_name", None) or service.label,
                 engine_client.model_config.max_model_len - 1,
                 max_inflight=max_inflight,
             )

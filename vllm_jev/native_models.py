@@ -23,6 +23,10 @@ CHOICE_PROTOCOL = "open_jev_choice"
 TINY_PROTOCOL = "tiny_jev_marker"
 D3_PROTOCOL = "d3_code_readout_v1"
 D3_FILES = {"decision_config.json", "readout.safetensors"}
+# pplx-decider releases share the d3 layout and add their request protocol.
+PPLX_PROTOCOL = "pplx_joint_readout_v4"
+PPLX_FILE = "joint_config.json"
+D3_PROTOCOLS = (D3_PROTOCOL, PPLX_PROTOCOL)
 DECISION_PROTOCOLS = (
     "kev_pointer_v1",
     "decider_slot_v1",
@@ -68,7 +72,7 @@ def _publish(
             else "jevany_pointer_manifest.json"
             if protocol == "jevany_pointer_v1"
             else "d3_manifest.json"
-            if protocol == D3_PROTOCOL
+            if protocol in D3_PROTOCOLS
             else "jev_manifest.json"
         )
         (temporary / name).write_text(json.dumps(manifest, indent=2) + "\n")
@@ -95,7 +99,7 @@ def prepare(model_id: str, workspace: Path, protocol: str = "auto") -> Path:
         "rsijev_xattn_v1",
         "clef_joint_v1",
         "jevany_pointer_v1",
-        D3_PROTOCOL,
+        *D3_PROTOCOLS,
         *DECISION_PROTOCOLS,
     ):
         raise ValueError(f"unknown protocol: {protocol}")
@@ -127,7 +131,7 @@ LOCAL_PROTOCOLS = (
     "mica_labels_v1",
     "task_json_v1",
     "thisthat_slot_v1",
-    D3_PROTOCOL,
+    *D3_PROTOCOLS,
 )
 
 
@@ -156,7 +160,7 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
     source = source.resolve()
     files = {file.name for file in source.iterdir() if file.is_file()}
     if D3_FILES <= files:
-        selected = D3_PROTOCOL
+        selected = PPLX_PROTOCOL if PPLX_FILE in files else D3_PROTOCOL
     elif "jevk5_config.json" in files:
         selected = "jevk5_letters_v1"
     elif protocol in ("mica_labels_v1", "thisthat_slot_v1", "task_json_v1"):
@@ -172,9 +176,10 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
         raise ValueError(f"{source} uses {selected}, not {protocol}")
     if selected == "task_json_v1" and "adapter_config.json" in files:
         raise ValueError("local task_json_v1 adapters must be merged before serving")
-    if selected == D3_PROTOCOL and sys.platform == "darwin":
+    if selected in D3_PROTOCOLS and sys.platform == "darwin":
         raise ValueError("d3 serving requires Linux and native vLLM")
     from .d3_export import export_d3
+    from .pplx_export import export_pplx
 
     export = {
         "decider_slot_v1": export_decider,
@@ -185,8 +190,11 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
         D3_PROTOCOL: lambda source, output, model_id, _: export_d3(
             source, output, model_id
         ),
+        PPLX_PROTOCOL: lambda source, output, model_id, _: export_pplx(
+            source, output, model_id
+        ),
     }[selected]
-    name = "d3_manifest.json" if selected == D3_PROTOCOL else "decision_manifest.json"
+    name = "d3_manifest.json" if selected in D3_PROTOCOLS else "decision_manifest.json"
     output = local_checkpoint(source, workspace)
     output.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(output) + ".lock"):
@@ -207,50 +215,71 @@ def prepare_local(source: Path, workspace: Path, protocol: str = "auto") -> Path
 
 
 def _prepare_d3(
-    model_id: str, workspace: Path, protocol: str, revision: str | None
+    model_id: str,
+    workspace: Path,
+    protocol: str,
+    revision: str | None,
+    selected: str = D3_PROTOCOL,
 ) -> Path:
     from .d3_export import SOURCE_FILES, export_d3, verify_d3
+    from .pplx_export import SOURCE_FILES as PPLX_SOURCE_FILES
+    from .pplx_export import export_pplx
 
     if sys.platform == "darwin":
         raise ValueError("d3 serving requires Linux and native vLLM")
-    if protocol not in ("auto", D3_PROTOCOL):
-        raise ValueError(f"{model_id} uses {D3_PROTOCOL}, not {protocol}")
+    if protocol not in ("auto", selected):
+        raise ValueError(f"{model_id} uses {selected}, not {protocol}")
     output = workspace / "checkpoint" / model_id
     if output.exists():
         manifest = json.loads((output / "d3_manifest.json").read_text())
         if manifest.get("source_repository") != model_id:
             raise ValueError("cached checkpoint belongs to another repository")
+        if manifest.get("prompt_protocol") != selected:
+            raise ValueError("requested protocol differs from cached checkpoint")
         verify_d3(output, full=True)
         return output
     if revision is None:
         revision = HfApi().model_info(model_id, files_metadata=False, token=False).sha
+    pplx = selected == PPLX_PROTOCOL
     source = Path(
         snapshot_download(
             repo_id=model_id,
             revision=revision,
             token=False,
             local_dir=workspace / "public" / model_id,
-            allow_patterns=SOURCE_FILES,
+            allow_patterns=PPLX_SOURCE_FILES if pplx else SOURCE_FILES,
         )
     )
+    export = export_pplx if pplx else export_d3
     return _publish(
         output,
         model_id,
         revision,
-        D3_PROTOCOL,
-        lambda temporary: export_d3(source, temporary, model_id),
+        selected,
+        lambda temporary: export(source, temporary, model_id),
     )
 
 
 def _prepare(model_id: str, workspace: Path, protocol: str) -> Path:
     from .d3_export import MODELS as D3_MODELS
     from .jevany_export import MODELS as JEVANY_MODELS
+    from .pplx_export import MODELS as PPLX_MODELS
 
+    cached = workspace / "checkpoint" / model_id / "d3_manifest.json"
+    cached_protocol = (
+        json.loads(cached.read_text()).get("prompt_protocol")
+        if cached.is_file()
+        else None
+    )
     if (
-        model_id in D3_MODELS
-        or protocol == D3_PROTOCOL
-        or (workspace / "checkpoint" / model_id / "d3_manifest.json").is_file()
+        model_id in PPLX_MODELS
+        or protocol == PPLX_PROTOCOL
+        or (protocol == "auto" and cached_protocol == PPLX_PROTOCOL)
     ):
+        return _prepare_d3(
+            model_id, workspace, protocol, PPLX_MODELS.get(model_id), PPLX_PROTOCOL
+        )
+    if model_id in D3_MODELS or protocol == D3_PROTOCOL or cached.is_file():
         return _prepare_d3(model_id, workspace, protocol, D3_MODELS.get(model_id))
 
     if model_id in JEVANY_MODELS:
@@ -524,7 +553,8 @@ def _prepare(model_id: str, workspace: Path, protocol: str) -> Path:
     info = HfApi().model_info(model_id, files_metadata=False, token=False)
     files = {item.rfilename for item in info.siblings}
     if D3_FILES <= files:
-        return _prepare_d3(model_id, workspace, protocol, info.sha)
+        selected = PPLX_PROTOCOL if PPLX_FILE in files else D3_PROTOCOL
+        return _prepare_d3(model_id, workspace, protocol, info.sha, selected)
     from .decision_protocols import TASK_JSON_MODELS, THIS_THAT_MODELS
 
     if "jevk5_config.json" in files or protocol == "jevk5_letters_v1":
@@ -875,7 +905,7 @@ def main() -> None:
             "rsijev_xattn_v1",
             "clef_joint_v1",
             "jevany_pointer_v1",
-            D3_PROTOCOL,
+            *D3_PROTOCOLS,
             *DECISION_PROTOCOLS,
         ),
         default="auto",

@@ -241,17 +241,21 @@ def export_d3(source: Path, output: Path, model_id: str = "d3") -> dict:
 
 
 def verify_d3(path: Path, *, full: bool = True) -> dict:
+    from .pplx import MARKER, SEPARATOR
+    from .pplx import PROTOCOL as PPLX_PROTOCOL
+
     path = path.resolve()
     manifest = json.loads((path / MANIFEST_FILE).read_text())
     if (
         manifest.get("format") != FORMAT
         or manifest.get("architecture") != D3_QWEN35_ARCHITECTURE
-        or manifest.get("prompt_protocol") != PROTOCOL
+        or manifest.get("prompt_protocol") not in (PROTOCOL, PPLX_PROTOCOL)
         or manifest.get("attention_mode") not in ATTENTION_MODES
         or manifest.get("readout_dtype") not in ("float32", "bfloat16")
         or not isinstance(manifest.get("vision"), bool)
     ):
         raise ValueError("unrecognized d3 checkpoint")
+    pplx = manifest["prompt_protocol"] == PPLX_PROTOCOL
     hidden = manifest.get("hidden_size")
     codes = manifest.get("codes")
     temperature = manifest.get("temperature")
@@ -272,6 +276,17 @@ def verify_d3(path: Path, *, full: bool = True) -> dict:
         or manifest["max_images"] < 0
     ):
         raise ValueError("invalid d3 dimensions, codes or limits")
+    if pplx and (
+        manifest["attention_mode"] != "noncausal_full_attention"
+        or type(manifest.get("marker_id")) is not int
+        or type(manifest.get("separator_id")) is not int
+        or type(manifest.get("max_pixels")) is not int
+        or type(manifest.get("default_max_length")) is not int
+        or not isinstance(manifest.get("escaped_tokens"), list)
+        or any(not isinstance(token, str) for token in manifest["escaped_tokens"])
+        or not {MARKER, SEPARATOR} <= set(manifest["escaped_tokens"])
+    ):
+        raise ValueError("invalid pplx-decider markers, image budget or escapes")
     config = json.loads((path / "config.json").read_text())
     causal = manifest["attention_mode"] == "causal"
     if (
@@ -292,6 +307,7 @@ def verify_d3(path: Path, *, full: bool = True) -> dict:
             "decision_config.json",
             "tokenizer.json",
             "tokenizer_config.json",
+            *(("joint_config.json",) if pplx else ()),
         ),
         full=full,
     )
