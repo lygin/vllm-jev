@@ -1,5 +1,8 @@
 """Native vLLM pooling models, imported only when vLLM loads a backbone."""
 
+import contextlib
+import functools
+
 import torch
 import triton
 import triton.language as tl
@@ -16,6 +19,39 @@ from vllm.model_executor.models.qwen3_vl_moe import (
     Qwen3VLMoeForConditionalGeneration,
 )
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
+
+# Kunlun replaces the GDN metadata builder globally; only its own Qwen3.5 layers
+# consume that metadata, so d3 must build on them there. Key on the active
+# platform, not on vllm_xpu being importable: Kunlun also reports is_cuda().
+_D3_KUNLUN = type(current_platform).__module__.startswith("vllm_xpu.")
+if _D3_KUNLUN:
+    import vllm_xpu.model_executor.models.qwen3_5 as _d3_qwen35
+else:
+    import vllm.model_executor.models.qwen3_5 as _d3_qwen35
+
+
+@contextlib.contextmanager
+def _bidirectional_full_attention():
+    """Build Kunlun's Qwen3.5 full-attention layers as ENCODER_ONLY.
+
+    Kunlun's Qwen3NextAttention ignores ``config.is_causal`` and constructs
+    ``Attention`` through its module global, so inject the type at build time;
+    Attention registers itself on construction and cannot be changed later.
+    """
+    original = _d3_qwen35.Attention
+
+    @functools.wraps(original)
+    def build(*args, **kwargs):
+        kwargs.setdefault("attn_type", AttentionType.ENCODER_ONLY)
+        return original(*args, **kwargs)
+
+    _d3_qwen35.Attention = build
+    try:
+        yield
+    finally:
+        _d3_qwen35.Attention = original
 
 
 class JevQwen35CausalLM(Qwen3_5ForCausalLM, IsHybrid, SupportsMRoPE):
@@ -101,7 +137,9 @@ class VllmJevAnyPointerQwen3VLMoeForTokenEmbedding(
     """Native MoE Qwen3-VL image/text states for JevAny's Pointer head."""
 
 
-class VllmD3Qwen35ForEmbedding(as_embedding_model(Qwen3_5ForConditionalGeneration)):
+class VllmD3Qwen35ForEmbedding(
+    as_embedding_model(_d3_qwen35.Qwen3_5ForConditionalGeneration)
+):
     """Native Qwen3.5 last-token states for the d3 and pplx-decider code readouts.
 
     These releases save a bare ``Qwen3_5Model``, so their weights lack the
@@ -139,7 +177,25 @@ class VllmD3Qwen35ForEmbedding(as_embedding_model(Qwen3_5ForConditionalGeneratio
                     "d3 bidirectional attention requires the V1 model runner: "
                     "set VLLM_USE_V2_MODEL_RUNNER=0"
                 )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        noncausal = not getattr(model_config.hf_text_config, "is_causal", True)
+        with (
+            _bidirectional_full_attention()
+            if _D3_KUNLUN and noncausal
+            else contextlib.nullcontext()
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if noncausal:
+            # Fail loudly rather than silently serving causal states.
+            causal = [
+                name
+                for name, module in self.named_modules()
+                if name.endswith("self_attn.attn")
+                and getattr(module, "attn_type", None) != AttentionType.ENCODER_ONLY
+            ]
+            if causal:
+                raise RuntimeError(
+                    f"d3 full-attention layers are not bidirectional: {causal[:3]}"
+                )
 
 
 class VllmJevQwen3ForTokenEmbedding(as_embedding_model(Qwen3ForCausalLM)):
