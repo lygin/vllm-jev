@@ -95,8 +95,42 @@ def main() -> None:
     environment = os.environ.copy()
     environment.setdefault("HF_HOME", str(workspace / ".cache"))
     environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    # Endpoint plugins load only when named in VLLM_PLUGINS, but that allowlist
+    # also gates every other group, platform plugins included. When it is
+    # unset, name every installed non-endpoint plugin so vendor platforms such
+    # as Cambricon's mlu still load, as they would with VLLM_PLUGINS unset.
     plugins = ["vllm_jev_model", "vllm_jev_endpoint"]
-    plugins.extend(filter(None, environment.get("VLLM_PLUGINS", "").split(",")))
+    if "VLLM_PLUGINS" in environment:
+        plugins.extend(filter(None, environment["VLLM_PLUGINS"].split(",")))
+        # A platform plugin named in the allowlist (e.g. Cambricon's "mlu")
+        # needs the general plugin shipped in the same distribution (e.g.
+        # "mlu_hijack"); without it the platform runs only half patched.
+        from importlib.metadata import entry_points
+
+        named = set(plugins)
+        platform_dists = {
+            plugin.dist.name
+            for plugin in entry_points(group="vllm.platform_plugins")
+            if plugin.name in named and plugin.dist is not None
+        }
+        plugins.extend(
+            plugin.name
+            for plugin in entry_points(group="vllm.general_plugins")
+            if plugin.dist is not None and plugin.dist.name in platform_dists
+        )
+    else:
+        from importlib.metadata import entry_points
+
+        plugins.extend(
+            plugin.name
+            for group in (
+                "vllm.general_plugins",
+                "vllm.platform_plugins",
+                "vllm.io_processor_plugins",
+                "vllm.stat_logger_plugins",
+            )
+            for plugin in entry_points(group=group)
+        )
     environment["VLLM_PLUGINS"] = ",".join(dict.fromkeys(plugins))
 
     from .laya_export import MODELS as LAYA_MODELS
